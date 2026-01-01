@@ -276,6 +276,7 @@ void wifi_init_sta(void)
 #define TCP_PORT           8989
 #define LISTEN_BACKLOG     1
 #define STATUS_TCP_PORT    9090
+#define HTTP_STATUS_PORT   9091
 
 static void uart_init_forward(void)
 {
@@ -523,6 +524,101 @@ static void status_server_task(void *pvParameters)
     }
 }
 
+static void http_status_server_task(void *pvParameters)
+{
+    struct sockaddr_in server_addr;
+    int listen_sock = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
+    if (listen_sock < 0) {
+        ESP_LOGE(TAG, "HTTP Status socket create failed");
+        vTaskDelete(NULL);
+        return;
+    }
+    int opt = 1;
+    setsockopt(listen_sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    server_addr.sin_port = htons(HTTP_STATUS_PORT);
+
+    if (bind(listen_sock, (struct sockaddr*)&server_addr, sizeof(server_addr)) != 0) {
+        ESP_LOGE(TAG, "HTTP Status socket bind failed");
+        close(listen_sock);
+        vTaskDelete(NULL);
+        return;
+    }
+    if (listen(listen_sock, 1) != 0) {
+        ESP_LOGE(TAG, "HTTP Status socket listen failed");
+        close(listen_sock);
+        vTaskDelete(NULL);
+        return;
+    }
+    ESP_LOGI(TAG, "HTTP Status server listening on port %d", HTTP_STATUS_PORT);
+
+    while(1) {
+        struct sockaddr_in source_addr;
+        socklen_t addr_len = sizeof(source_addr);
+        int client_sock = accept(listen_sock, (struct sockaddr*)&source_addr, &addr_len);
+        if (client_sock < 0) {
+            vTaskDelay(pdMS_TO_TICKS(100));
+            continue;
+        }
+
+        /* Read and discard request headers */
+        char rx_buf[256];
+        recv(client_sock, rx_buf, sizeof(rx_buf), 0);
+
+        wifi_ap_record_t ap_info;
+        int8_t rssi = 0;
+        if (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK) {
+            rssi = ap_info.rssi;
+        }
+
+        esp_netif_ip_info_t ip_info;
+        esp_netif_t *netif = esp_netif_get_default_netif();
+        if (netif) {
+            esp_netif_get_ip_info(netif, &ip_info);
+        } else {
+            memset(&ip_info, 0, sizeof(ip_info));
+        }
+
+        uint32_t bytes_last_min = 0;
+        for (int i=0; i<60; i++) {
+            bytes_last_min += s_bytes_history[i];
+        }
+
+        portENTER_CRITICAL(&stats_spinlock);
+        uint64_t total_bytes_bridged = s_total_bytes_bridged;
+        int is_client_connected = s_is_client_connected;
+        portEXIT_CRITICAL(&stats_spinlock);
+
+        char json_buf[256];
+        int json_len = snprintf(json_buf, sizeof(json_buf),
+            "{\"rssi\":%d,\"ip\":\"" IPSTR "\",\"client_connected\":%s,\"total_bytes\":%llu,\"bytes_last_min\":%lu}",
+            rssi,
+            IP2STR(&ip_info.ip),
+            is_client_connected ? "true" : "false",
+            total_bytes_bridged,
+            (unsigned long)bytes_last_min
+        );
+
+        char http_buf[512];
+        int http_len = snprintf(http_buf, sizeof(http_buf),
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: application/json\r\n"
+            "Content-Length: %d\r\n"
+            "Connection: close\r\n"
+            "Access-Control-Allow-Origin: *\r\n"
+            "\r\n"
+            "%s",
+            json_len,
+            json_buf
+        );
+
+        send(client_sock, http_buf, http_len, 0);
+        vTaskDelay(pdMS_TO_TICKS(100));
+        close(client_sock);
+    }
+}
+
 void app_main(void)
 {
     //Initialize NVS
@@ -547,4 +643,5 @@ void app_main(void)
     xTaskCreate(tcp_server_task, "tcp_server", 4096, NULL, 5, NULL);
     xTaskCreate(stats_task, "stats_task", 2048, NULL, 5, NULL);
     xTaskCreate(status_server_task, "status_server", 4096, NULL, 5, NULL);
+    xTaskCreate(http_status_server_task, "http_status", 4096, NULL, 5, NULL);
 }
