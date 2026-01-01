@@ -86,6 +86,8 @@ static uint8_t s_led_state = 0;
 static volatile TickType_t s_last_activity_time = 0;
 static volatile int s_is_client_connected = 0;
 
+static portMUX_TYPE stats_spinlock = portMUX_INITIALIZER_UNLOCKED;
+
 static volatile uint64_t s_total_bytes_bridged = 0;
 static volatile uint32_t s_byte_accumulator = 0;
 static uint32_t s_bytes_history[60] = {0};
@@ -163,7 +165,10 @@ static void led_task(void *arg)
         EventBits_t bits = xEventGroupGetBits(s_wifi_event_group);
         /* If connected, keep LED ON and park the task */
         if (bits & WIFI_CONNECTED_BIT) {
-            if (xTaskGetTickCount() - s_last_activity_time < pdMS_TO_TICKS(200)) {
+            portENTER_CRITICAL(&stats_spinlock);
+            TickType_t last_activity = s_last_activity_time;
+            portEXIT_CRITICAL(&stats_spinlock);
+            if (xTaskGetTickCount() - last_activity < pdMS_TO_TICKS(200)) {
                 s_led_state = !s_led_state;
                 blink_led();
                 vTaskDelay(pdMS_TO_TICKS(100));
@@ -292,7 +297,9 @@ static void tcp_client_handler(void *arg)
     uint8_t* data = (uint8_t*)malloc(BUF_SIZE);
     if (!data) {
         ESP_LOGE(TAG, "malloc failed");
+        portENTER_CRITICAL(&stats_spinlock);
         s_is_client_connected = 0;
+        portEXIT_CRITICAL(&stats_spinlock);
         close(client_sock);
         vTaskDelete(NULL);
         return;
@@ -300,9 +307,11 @@ static void tcp_client_handler(void *arg)
     while (1) {
         int len = uart_read_bytes(UART_PORT_NUM, data, BUF_SIZE, pdMS_TO_TICKS(20));
         if (len > 0) {
+            portENTER_CRITICAL(&stats_spinlock);
             s_total_bytes_bridged += len;
             s_byte_accumulator += len;
             s_last_activity_time = xTaskGetTickCount();
+            portEXIT_CRITICAL(&stats_spinlock);
             int to_send = len;
             int sent = 0;
             while (to_send > 0) {
@@ -317,9 +326,11 @@ static void tcp_client_handler(void *arg)
         }
         int r = recv(client_sock, (char*)data, BUF_SIZE, MSG_DONTWAIT);
         if (r > 0) {
+            portENTER_CRITICAL(&stats_spinlock);
             s_total_bytes_bridged += r;
             s_byte_accumulator += r;
             s_last_activity_time = xTaskGetTickCount();
+            portEXIT_CRITICAL(&stats_spinlock);
             int written = uart_write_bytes(UART_PORT_NUM, (const char*)data, r);
             if (written < 0) {
                 ESP_LOGE(TAG, "uart write failed");
@@ -336,7 +347,9 @@ static void tcp_client_handler(void *arg)
         }
     }
 cleanup:
+    portENTER_CRITICAL(&stats_spinlock);
     s_is_client_connected = 0;
+    portEXIT_CRITICAL(&stats_spinlock);
     close(client_sock);
     free(data);
     vTaskDelete(NULL);
@@ -390,14 +403,19 @@ static void tcp_server_task(void *pvParameters)
         setsockopt(client_sock, IPPROTO_TCP, TCP_KEEPINTVL, &keepInterval, sizeof(int));
         setsockopt(client_sock, IPPROTO_TCP, TCP_KEEPCNT, &keepCount, sizeof(int));
 
+        portENTER_CRITICAL(&stats_spinlock);
         if (s_is_client_connected) {
+            portEXIT_CRITICAL(&stats_spinlock);
             ESP_LOGW(TAG, "Client already connected, rejecting new connection");
             close(client_sock);
         } else {
             s_is_client_connected = 1;
+            portEXIT_CRITICAL(&stats_spinlock);
             if (xTaskCreate(tcp_client_handler, "tcp_client", 4096, (void*)(intptr_t)client_sock, 5, NULL) != pdPASS) {
                 ESP_LOGE(TAG, "Failed to create tcp_client task");
+                portENTER_CRITICAL(&stats_spinlock);
                 s_is_client_connected = 0;
+                portEXIT_CRITICAL(&stats_spinlock);
                 close(client_sock);
             }
         }
@@ -411,7 +429,9 @@ static void stats_task(void *arg)
     uint32_t last_acc = 0;
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(1000));
+        portENTER_CRITICAL(&stats_spinlock);
         uint32_t now = s_byte_accumulator;
+        portEXIT_CRITICAL(&stats_spinlock);
         uint32_t delta = now - last_acc;
         last_acc = now;
         s_bytes_history[s_history_idx] = delta;
@@ -476,6 +496,11 @@ static void status_server_task(void *pvParameters)
             bytes_last_min += s_bytes_history[i];
         }
 
+        portENTER_CRITICAL(&stats_spinlock);
+        uint64_t total_bytes_bridged = s_total_bytes_bridged;
+        int is_client_connected = s_is_client_connected;
+        portEXIT_CRITICAL(&stats_spinlock);
+
         char buf[512];
         int len = snprintf(buf, sizeof(buf),
             "\r\n--- Status Monitor ---\r\n"
@@ -487,8 +512,8 @@ static void status_server_task(void *pvParameters)
             "----------------------\r\n",
             rssi,
             IP2STR(&ip_info.ip),
-            s_is_client_connected ? "Yes" : "No",
-            s_total_bytes_bridged,
+            is_client_connected ? "Yes" : "No",
+            total_bytes_bridged,
             (unsigned long)bytes_last_min
         );
 
