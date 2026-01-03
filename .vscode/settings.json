@@ -1,12 +1,12 @@
 {
   "C_Cpp.intelliSenseEngine": "default",
-  "idf.espIdfPath": "/Users/stoneshi/.espressif/v5.5.2/esp-idf",
-  "idf.pythonInstallPath": "/opt/homebrew/bin/python3",
+  "idf.espIdfPath": "/home/stoneshi/esp/v5.5.2/esp-idf",
+  "idf.pythonInstallPath": "/usr/bin/python3",
   "idf.openOcdConfigs": [
     "board/esp32s3-builtin.cfg"
   ],
-  "idf.port": "/dev/tty.usbmodem20401",
-  "idf.toolsPath": "/Users/stoneshi/.espressif/tools",
+  "idf.port": "/dev/ttyACM0",
+  "idf.toolsPath": "/home/stoneshi/esp/tools",
   "idf.customExtraVars": {
     "IDF_TARGET": "esp32s3"
   },
